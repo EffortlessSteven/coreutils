@@ -71,7 +71,6 @@ fn test_invalid_input() {
 #[case::interpret_one_and_two_digit_octal_escape(&["XYZ", r"\0\11\77"], "XYZ", "\0\t?")]
 #[case::octal_escape_is_at_most_three_digits(&["XY", r"\0156"], "XY", "\r6")]
 #[case::non_octal_digit_ends_escape(&["rust", r"\08\11956"], "rust", "\08\t9")]
-#[case::interpret_backslash_at_eol_literally(&["X", r"\"], "X", "\\")]
 #[case::tr_translate_range_to_repeat_class_zero(&["abcd", "[]*]"], "abcd", "]]]]")]
 #[case::tr_translate_range_to_repeat_class(&["rst", "[%*]uvw"], "rst", "uvw")]
 #[case::tr_translate_empty_set1_noop(&["", "[.*]"], "rst", "rst")]
@@ -1184,6 +1183,99 @@ fn test_trailing_backslash() {
 }
 
 #[test]
+fn test_trailing_backslash_warning_in_set2() {
+    new_ucmd!()
+        .args(&["X", r"\"])
+        .pipe_in("X")
+        .succeeds()
+        .stderr_is("tr: warning: an unescaped backslash at end of string is not portable\n")
+        .stdout_is("\\");
+}
+
+#[test]
+fn test_trailing_backslash_warning_in_both_sets() {
+    new_ucmd!()
+        .args(&[r"\", r"\"])
+        .pipe_in("\\")
+        .succeeds()
+        .stderr_is(concat!(
+            "tr: warning: an unescaped backslash at end of string is not portable\n",
+            "tr: warning: an unescaped backslash at end of string is not portable\n",
+        ))
+        .stdout_is("\\");
+}
+
+#[test]
+fn test_escaped_trailing_backslash_in_set2_does_not_warn() {
+    new_ucmd!()
+        .args(&[".", r"\\"])
+        .pipe_in(".")
+        .succeeds()
+        .no_stderr()
+        .stdout_is("\\");
+}
+
+#[rstest]
+#[case::set1_syntax_error_prevents_set2_warning(
+    &["z-a", r"\"],
+    "tr: range-endpoints of 'z-a' are in reverse collating sequence order\n"
+)]
+#[case::set2_warning_precedes_set1_semantic_error(
+    &["[x*]", r"\"],
+    concat!(
+        "tr: warning: an unescaped backslash at end of string is not portable\n",
+        "tr: the [c*] repeat construct may not appear in string1\n",
+    )
+)]
+#[case::set2_syntax_error_precedes_set1_semantic_error(
+    &["[x*]", "z-a"],
+    "tr: range-endpoints of 'z-a' are in reverse collating sequence order\n"
+)]
+#[case::set2_warning_precedes_its_syntax_error(
+    &["x", r"z-a\"],
+    concat!(
+        "tr: warning: an unescaped backslash at end of string is not portable\n",
+        "tr: range-endpoints of 'z-a' are in reverse collating sequence order\n",
+    )
+)]
+fn test_set_diagnostic_order(#[case] args: &[&str], #[case] expected_stderr: &str) {
+    new_ucmd!()
+        .args(args)
+        .fails_with_code(1)
+        .stderr_only(expected_stderr);
+}
+
+#[test]
+fn test_parser_warning_precedes_trailing_backslash_warning() {
+    new_ucmd!()
+        .args(&["-d", r"\501\"])
+        .pipe_in("(1Ł)")
+        .succeeds()
+        .stdout_is("Ł)")
+        .stderr_is(concat!(
+            r"tr: warning: the ambiguous octal escape \501\ is being interpreted as the 2-byte sequence \050, 1",
+            "\n",
+            "tr: warning: an unescaped backslash at end of string is not portable\n",
+        ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_warning_write_failures() {
+    // An unwritable warning sets exit status 1 but keeps the translated output.
+    for (args, input, expected_stdout) in
+        [([".", r"\"], ".", "\\"), (["-d", r"\501"], "(1Ł)", "Ł)")]
+    {
+        new_ucmd!()
+            .args(&args)
+            .pipe_in(input)
+            .set_stderr(std::fs::File::create("/dev/full").unwrap())
+            .fails_with_code(1)
+            .stdout_is(expected_stdout);
+    }
+}
+
+#[test]
 fn test_multibyte_octal_sequence() {
     new_ucmd!()
         .args(&["-d", r"\501"])
@@ -1609,6 +1701,30 @@ tr: we: equivalence class operand must be a single character
    │               ──────
    │
    │ Help: [=c=] stands for every character equivalent to c
+───╯"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_snippet_points_at_a_set2_syntax_error_before_a_set1_semantic_error() {
+        // `[x*]` is rejected only after set2 parses, so the caret is on `z-a`.
+        let result = new_ucmd!()
+            .terminal_sim_stderr()
+            .args(&["[x*]", "z-a"])
+            .fails_with_code(1);
+
+        assert_eq!(
+            result.stderr_as_displayed(),
+            "\
+tr: range-endpoints of 'z-a' are in reverse collating sequence order
+   ╭─[ tr:1:9 ]
+   │
+ 1 │ tr [x*] z-a
+   │         ─┬─
+   │          ╰─── did you mean 'a-z'?
+   │
+   │ Help: a range goes from the lower character to the higher one, as in a-z
 ───╯"
         );
     }
