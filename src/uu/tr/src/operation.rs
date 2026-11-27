@@ -22,10 +22,22 @@ use std::{
     io::{BufRead, Write},
     ops::Range,
 };
-use uucore::error::{FromIo, UError, UResult};
+use uucore::error::{FromIo, UError, UResult, set_exit_code};
 use uucore::translate;
 
-use uucore::show_warning;
+/// Write a diagnostic to stderr; a failed write sets exit status 1 without aborting.
+fn emit_diagnostic(message: impl Display) {
+    let mut stderr = std::io::stderr().lock();
+
+    if writeln!(stderr, "{}: {message}", uucore::util_name()).is_err() {
+        set_exit_code(1);
+    }
+}
+
+/// Whether the operand ends in a backslash that is not itself escaped.
+fn has_unescaped_trailing_backslash(input: &[u8]) -> bool {
+    input.iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 1
+}
 
 /// Common trait for operations that can process chunks of data
 pub trait ChunkProcessor {
@@ -346,20 +358,22 @@ impl Sequence {
     ) -> Result<(Vec<u8>, Vec<u8>), SequenceError> {
         let is_char_star = |s: &&Self| -> bool { matches!(s, Self::CharStar(_)) };
 
+        // Parse set2 before validating set1, so its warnings and syntax errors come first (as in GNU).
         let set1 = Self::parse_set(set1_str).map_err(|(error, span)| SequenceError {
             error,
             set: 1,
             span: Some(span),
         })?;
-        if set1.iter().filter(is_char_star).count() != 0 {
-            return Err(SequenceError::whole_set(BadSequence::CharRepeatInSet1, 1));
-        }
-
         let mut set2 = Self::parse_set(set2_str).map_err(|(error, span)| SequenceError {
             error,
             set: 2,
             span: Some(span),
         })?;
+
+        if set1.iter().filter(is_char_star).count() != 0 {
+            return Err(SequenceError::whole_set(BadSequence::CharRepeatInSet1, 1));
+        }
+
         if set2.iter().filter(is_char_star).count() > 1 {
             return Err(SequenceError::whole_set(
                 BadSequence::MultipleCharRepeatInSet2,
@@ -590,6 +604,10 @@ impl Sequence {
             }
             rest = next;
         }
+        // After parser warnings, before this operand's syntax error (as in GNU).
+        if has_unescaped_trailing_backslash(input) {
+            emit_diagnostic(translate!("tr-warning-unescaped-backslash"));
+        }
         match first_error {
             Some(error) => Err(error),
             None => Ok(result),
@@ -637,12 +655,11 @@ impl Sequence {
                     if let Ok(origin_octal) = std::str::from_utf8(input) {
                         let actual_octal_tail: &str = std::str::from_utf8(&input[0..2]).unwrap();
                         let outstand_char: char = char::from_u32(input[2] as u32).unwrap();
-                        show_warning!(
-                            "{}",
-                            translate!("tr-warning-ambiguous-octal-escape", "origin_octal" => origin_octal, "actual_octal_tail" => actual_octal_tail, "outstand_char" => outstand_char)
+                        emit_diagnostic(
+                            translate!("tr-warning-ambiguous-octal", "origin_octal" => origin_octal, "actual_octal_tail" => actual_octal_tail, "outstand_char" => outstand_char)
                         );
                     } else {
-                        show_warning!("{}", translate!("tr-warning-invalid-utf8"));
+                        emit_diagnostic(translate!("tr-warning-invalid-utf8-sequence"));
                     }
                 }
                 result
